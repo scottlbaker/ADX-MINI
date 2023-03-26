@@ -1,7 +1,7 @@
 
 // ============================================================================
 //
-// ADX_MINI_V2.ino  ::  ADX-MINI Control Program
+// ADX_MINI_V3.ino  ::  ADX-MINI Control Program
 //
 // This control program was derived from the ADX control program.
 // It is compatible with ADX, ADX-UNO, and ADX-MINI hardware.
@@ -46,8 +46,8 @@
 // ============================================================================
 
 #define DEBUG     0                 // set to 1 for debugging
-#define VERSION   "ADX-MINI 1.01a"  // firmware version
-#define DATE      "Jan 16 2023"     // firmware date
+#define VERSION   "ADX-MINI 1.03a"  // firmware version
+#define DATE      "Mar 26 2023"     // firmware date
 
 // Arduino Pins
 #define LTSW      2     // PD2   UI pushbutton <
@@ -90,6 +90,7 @@ void manualTX();
 void si5351_cal();
 void FSK_tone();
 void check_VOX();
+void rx_mode();
 void check_UI();
 void save_eeprom();
 void read_eeprom();
@@ -265,7 +266,7 @@ void blink_band() {
   for (uint8_t i=0; i<2; i++) {
     clrLED();
     delay(DLY1);
-    setLED(0, band_slot);
+    setLED(0, band_slot);  // display band
     delay(DLY1);
   }
 }
@@ -275,7 +276,7 @@ void blink_mode() {
   for (uint8_t i=0; i<2; i++) {
     clrLED();
     delay(DLY1);
-    setLED(mode, 0);
+    setLED(mode, 0);  // display mode
     delay(DLY1);
   }
 }
@@ -299,6 +300,7 @@ void mode_assign() {
       break;
   }
   freq = base_freq;
+  rx_mode();
 }
 
 // band frequency assignments
@@ -417,7 +419,7 @@ void band_select() {
         // decrement the band slot
         band_slot = band_slot - 1;
         if (band_slot < MIN_SLOT) band_slot = MAX_SLOT;
-        setLED(0, band_slot);
+        setLED(0, band_slot);  // display band
         band_assign();
       }
       while (LT_PRESSED);  // wait for release
@@ -444,7 +446,7 @@ void band_select() {
         // increment the band slot
         band_slot = band_slot + 1;
         if (band_slot > MAX_SLOT) band_slot = MIN_SLOT;
-        setLED(0, band_slot);
+        setLED(0, band_slot);  // display band
         band_assign();
       }
       while (RT_PRESSED);  // wait for release
@@ -465,7 +467,7 @@ void band_select() {
         // manual TX
         clrLED();
         manualTX();
-        setLED(0, band_slot);
+        setLED(0, band_slot);  // display band
       } else {
         // for short click of TX
         // save the band slot to eeprom
@@ -491,8 +493,7 @@ void manualTX() {
   si5351.output_enable(SI5351_CLK0, 1);   // TX on
   while (TX_PRESSED);  // wait for release
   delay(DEBOUNCE);
-  digitalWrite(TXXLED, OFF);
-  si5351.output_enable(SI5351_CLK0, 0);   // TX off
+  rx_mode();           // back to rx mode
 }
 
 // si5351 calibration
@@ -536,6 +537,7 @@ void si5351_cal() {
   si5351.set_clock_pwr(SI5351_CLK2, 0);
   EEPROM.put(DATA_ADDR, cal_data);
   blinkTX();  // blink TX LED when done
+  rx_mode();  // put radio in rx mode
 }
 
 #define MAXVOX  15     // VOX timeout (ms)
@@ -571,21 +573,23 @@ void FSK_tone() {
   vox_timer = millis();  // reset the vox timer
 }
 
-// check for VOX timeout
+// if VOX timeout then return to rx mode
 void check_VOX() {
-  if (FSKtx) {
-    if (millis() - vox_timer > MAXVOX) {
-      // if timeout then return to RX
-      digitalWrite(TXXLED, OFF);
-      setLED(mode, 0);
-      si5351.output_enable(SI5351_CLK0, 0);   //TX off
-      si5351.set_freq(freq*100, SI5351_CLK1);
-      si5351.output_enable(SI5351_CLK1, 1);   //RX on
-      digitalWrite(RXGATE, ON);
-      FSKtx = FALSE;
-      d2ICR = FALSE;
-    }
+  if ((FSKtx) && (millis() - vox_timer > MAXVOX)) {
+    FSKtx = FALSE;
+    d2ICR = FALSE;
+    rx_mode();
+    setLED(mode, 0);  // display mode
   }
+}
+
+// put radio in rx mode
+void rx_mode() {
+  digitalWrite(TXXLED, OFF);
+  si5351.output_enable(SI5351_CLK0, 0);   // TX off
+  si5351.set_freq(base_freq*100, SI5351_CLK1);
+  si5351.output_enable(SI5351_CLK1, 1);   // RX on
+  digitalWrite(RXGATE, ON);
 }
 
 // check the UI buttons
@@ -610,7 +614,7 @@ void check_UI() {
       mode = mode<<1;
       if (mode > MAX_MODE) mode = MIN_MODE; // wrap
       mode_assign();
-      setLED(mode, 0);
+      setLED(mode, 0);   // display mode
     }
     while (LT_PRESSED);  // wait for release
     delay(DEBOUNCE);
@@ -620,7 +624,7 @@ void check_UI() {
     mode = mode>>1;
     if (mode < MIN_MODE) mode = MAX_MODE; // wrap
     mode_assign();
-    setLED(mode, 0);
+    setLED(mode, 0);     // display mode
     while (RT_PRESSED);  // wait for release
     delay(DEBOUNCE);
   }
@@ -639,12 +643,12 @@ void check_UI() {
       // manual TX
       clrLED();
       manualTX();
-      setLED(mode, 0);
+      setLED(mode, 0);  // display mode
     } else {
       // for short click of TX
       // save the radio mode
       blinkTX();
-      setLED(mode, 0);
+      setLED(mode, 0);  // display mode
       EEPROM.put(MODE_ADDR, mode);
       // wait for release
       while (TX_PRESSED);
@@ -689,6 +693,7 @@ void init_VFO() {
   si5351.set_pll(SI5351_PLL_FIXED, SI5351_PLLA);
   si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
   si5351.drive_strength(SI5351_CLK1, SI5351_DRIVE_2MA);
+  band_assign();
 }
 
 // initialize the timer
@@ -726,18 +731,17 @@ void setup() {
   initPins();
   Serial.begin(BAUD);
   print_version();
-  // if < button active then read eeprom
+  // if < button active then factory reset
   // if > button active then calibrate
   if (!LT_PRESSED) read_eeprom();
-  else save_eeprom();    // factory reset
+  else save_eeprom();
   init_VFO();
   if (RT_PRESSED) si5351_cal();
   init_timer();
-  band_assign();
-  blink_band();          // blink band on LEDs
+  blink_band();    // blink band on LEDs
   delay(500);
-  blink_mode();          // blink mode on LEDs
-  wait4buttons();        // wait for all buttons released
+  blink_mode();    // blink mode on LEDs
+  wait4buttons();  // wait for all buttons released
 }
 
 #define EVENT (TIFR1 & (1<<ICF1))  // capture event
