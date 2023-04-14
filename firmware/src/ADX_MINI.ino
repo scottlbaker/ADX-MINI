@@ -1,7 +1,7 @@
 
 // ============================================================================
 //
-// ADX_MINI_V3.ino  ::  ADX-MINI Control Program
+// ADX_MINI.ino  ::  ADX-MINI Control Program with CAT control
 //
 // This control program was derived from the ADX control program.
 // It is compatible with ADX, ADX-UNO, and ADX-MINI hardware.
@@ -45,9 +45,10 @@
 //
 // ============================================================================
 
-#define DEBUG     0                 // set to 1 for debugging
-#define VERSION   "ADX-MINI 1.03a"  // firmware version
-#define DATE      "Mar 26 2023"     // firmware date
+#define DEBUG     0                     // set to 1 for debugging
+#define VERSION   "ADX-MINI 1.04b"      // firmware version
+#define DATE      "Apr 12 2023"         // firmware date
+#define NOTE1     "with CAT support"    // firmware notes
 
 // Arduino Pins
 #define LTSW      2     // PD2   UI pushbutton <
@@ -68,13 +69,25 @@
 #define YES   1
 #define FALSE 0
 #define TRUE  1
+#define RIGHT 0
+#define LEFT  1
 
 #include <Wire.h>
 #include <EEPROM.h>
 #include "si5351.h"
 
-// prototype defs
+// string prototype defs
+char getc();
+char gnac();
+uint8_t len(char *str);
+uint8_t cmpstr(char *dst, char *src);
+uint8_t alpha(char ch);
+uint8_t numeric(char ch);
+void catstr(char *dst, char c);
+void uppercase(char *str);
+uint32_t fs2int(char *str);
 
+// prototype defs
 void print_version();
 void wait_ms(uint16_t dly);
 void clrLED();
@@ -83,15 +96,23 @@ void blinkTX();
 void setLED(uint8_t data, uint8_t band);
 void blink_band();
 void blink_mode();
+void set_all();
+void clr_all();
+void blink_all();
+void cylon(uint8_t left);
 void mode_assign();
 void band_assign();
 void band_select();
+void freq2band();
 void manualTX();
 void si5351_cal();
 void FSK_tone();
 void check_VOX();
 void rx_mode();
+void printVFO();
 void check_UI();
+void check_CAT();
+void CAT_control();
 void save_eeprom();
 void read_eeprom();
 void init_VFO();
@@ -180,6 +201,9 @@ const int8_t bandENC[11] = {
 #define CAL_DATA_INIT  64000ULL
 uint32_t cal_data = CAL_DATA_INIT;
 
+// CAT mode
+uint8_t cat_mode = OFF;
+
 // FSK transmit status
 uint8_t FSKtx = FALSE;
 
@@ -204,11 +228,82 @@ uint8_t band_slot = BAND20;
 
 Si5351 si5351;
 
+// read char from the serial port
+char getc() {
+  while (!Serial.available());
+  return(Serial.read());
+}
+
+// get next alpha char from serial buffer
+char gnac() {
+  char ch;
+  uint16_t tc = 0;  // for timeout
+  while (TRUE) {
+    if (Serial.available()) {
+      ch = Serial.read();
+      if (alpha(ch)) return(ch);
+    } else {
+      if (tc++ > 1024) return('z');
+    }
+  }
+}
+
+// return the length of string
+uint8_t len(char *str) {
+  uint8_t i=0;
+  while (str[i++]);
+  return i-1;
+}
+
+// compare command
+uint8_t cmpstr(char *x, char *y) {
+  if ((x[0] == y[0]) && (x[1] == y[1])) return(1);
+  else return(0);
+}
+
+uint8_t alpha(char ch) {
+  if ((ch >= 'a') && (ch <= 'z')) return(1);
+  if ((ch >= 'A') && (ch <= 'Z')) return(1);
+  return(0);
+}
+
+uint8_t numeric(char ch) {
+  if ((ch >= '0') && (ch <= '9')) return(1);
+  return(0);
+}
+
+// concatenate a character to a string
+void catstr(char *dst, char ch) {
+  uint8_t strlen= len(dst);
+  dst[strlen++] = ch;
+  dst[strlen] = '\0';
+}
+
+// convert command to upper case
+void uppercase(char *str) {
+  if ((str[0] >= 'a') && (str[0] <= 'z')) str[0] -= 32;
+  if ((str[1] >= 'a') && (str[1] <= 'z')) str[1] -= 32;
+}
+
+// convert frequency string to integer
+uint32_t fs2int(char *str) {
+  uint32_t tmp = 0;
+  uint32_t pwr10 = 1;
+  char ch;
+  for (uint8_t i=10; i>2; i--) {
+    ch = str[i] - 48;
+    tmp += ch * pwr10;
+    pwr10 = ((pwr10<<3)+(pwr10<<1));
+  }
+  return(tmp);
+}
+
 // print the firmware version
 void print_version() {
   Serial.print("\n\n");
   Serial.println(VERSION);
   Serial.println(DATE);
+  Serial.println(NOTE1);
   Serial.print("\n\n");
 }
 
@@ -281,6 +376,62 @@ void blink_mode() {
   }
 }
 
+// set all LEDs
+void set_all() {
+  digitalWrite(FT8LED, ON);
+  digitalWrite(FT4LED, ON);
+  digitalWrite(JS8LED, ON);
+  digitalWrite(WSPLED, ON);
+  digitalWrite(TXXLED, ON);
+}
+
+// clear all LEDs
+void clr_all() {
+  digitalWrite(FT8LED, OFF);
+  digitalWrite(FT4LED, OFF);
+  digitalWrite(JS8LED, OFF);
+  digitalWrite(WSPLED, OFF);
+  digitalWrite(TXXLED, OFF);
+}
+
+// blink all the LEDs
+void blink_all() {
+  clr_all();
+  delay(500);
+  set_all();
+  delay(500);
+  clr_all();
+}
+
+// cylon blink all the LEDs
+void cylon(uint8_t left) {
+  clr_all();
+  delay(500);
+  if (left) {
+    digitalWrite(FT8LED, ON);
+    delay(100);
+    digitalWrite(FT4LED, ON);
+    delay(100);
+    digitalWrite(TXXLED, ON);
+    delay(100);
+    digitalWrite(JS8LED, ON);
+    delay(100);
+    digitalWrite(WSPLED, ON);
+  } else {
+    digitalWrite(WSPLED, ON);
+    delay(100);
+    digitalWrite(JS8LED, ON);
+    delay(100);
+    digitalWrite(TXXLED, ON);
+    delay(100);
+    digitalWrite(FT4LED, ON);
+    delay(100);
+    digitalWrite(FT8LED, ON);
+  }
+  delay(500);
+  clr_all();
+}
+
 // mode assignments
 void mode_assign() {
   switch (mode) {
@@ -307,21 +458,21 @@ void mode_assign() {
 void band_assign() {
   switch (band_slot) {
     case BAND160:
-      // 160m/1.75Mhz
-      F_FT8 = 3573000;
-      F_FT4 = 3575000;
-      F_JS8 = 3578000;
-      F_WSP = 3568600;
+      // 160M band
+      F_FT8 = 1842000;
+      F_FT4 = 1842000;
+      F_JS8 = 1842000;
+      F_WSP = 1842000;
       break;
     case BAND80:
-      // 80m/3.5Mhz
+      // 80M band
       F_FT8 = 3573000;
       F_FT4 = 3575000;
       F_JS8 = 3578000;
       F_WSP = 3568600;
       break;
     case BAND60:
-      // 60m/5 Mhz
+      // 60M band
       /*
       F_FT8 =
       F_FT4 =
@@ -330,62 +481,60 @@ void band_assign() {
       */
       break;
     case BAND40:
-      // 40m/7 Mhz
+      // 40M band
       F_FT8 = 7074000;
       F_FT4 = 7047500;
       F_JS8 = 7078000;
       F_WSP = 7038600;
       break;
     case BAND30:
-      // 30m/10 Mhz
+      // 30M band
       F_FT8 = 10136000;
       F_FT4 = 10140000;
       F_JS8 = 10130000;
       F_WSP = 10138700;
       break;
     case BAND20:
-      // 20m/14 Mhz
+      // 20M band
       F_FT8 = 14074000;
       F_FT4 = 14080000;
       F_JS8 = 14078000;
       F_WSP = 14095600;
       break;
     case BAND17:
-      // 17m/18 Mhz
+      // 17M band
       F_FT8 = 18100000;
       F_FT4 = 18104000;
       F_JS8 = 18104000;
       F_WSP = 18104600;
       break;
     case BAND15:
-      // 15m/21Mhz
+      // 15M band
       F_FT8 = 21074000;
       F_FT4 = 21140000;
       F_JS8 = 21078000;
       F_WSP = 21094600;
       break;
     case BAND12:
-      // 12m/24Mhz
+      // 12M band
       F_FT8 = 24915000;
       F_FT4 = 24919000;
       F_JS8 = 24922000;
       F_WSP = 24924600;
       break;
     case BAND10:
-      // 10m/28Mhz
+      // 10M band
       F_FT8 = 28074000;
       F_FT4 = 28180000;
       F_JS8 = 28078000;
       F_WSP = 28124600;
       break;
     case BAND06:
-      // 6m/48Mhz
-      /*
-      F_FT8 =
-      F_FT4 =
-      F_JS8 =
-      F_WSP =
-      */
+      // 6M band
+      F_FT8 = 50313000;
+      F_FT4 = 50318000;
+      F_JS8 = 50318000;
+      F_WSP = 50293000;
       break;
   }
   mode_assign();
@@ -393,12 +542,12 @@ void band_assign() {
 
 // band select
 void band_select() {
-  bool done = FALSE;
+  bool done = NO;
   blink_band();
   while ((LT_PRESSED)||(RT_PRESSED));  // wait for release
   delay(DEBOUNCE);
   while (!done) {
-    // check the < pushbutton
+    // check the < button
     if (LT_PRESSED) {
       t0 = millis();
       event = CLICK;
@@ -410,12 +559,12 @@ void band_select() {
       }
       delay(DEBOUNCE);
       if (event == LONG) {
-        // for long press of <
+        // for long press of < button
         // exit band-select mode
-        done = TRUE;
+        done = YES;
         blink_mode();
       } else {
-        // for short click of <
+        // for short click of < button
         // decrement the band slot
         band_slot = band_slot - 1;
         if (band_slot < MIN_SLOT) band_slot = MAX_SLOT;
@@ -425,7 +574,7 @@ void band_select() {
       while (LT_PRESSED);  // wait for release
       delay(DEBOUNCE);
     }
-    // check the > pushbutton
+    // check the > button
     if (RT_PRESSED) {
       t0 = millis();
       event = CLICK;
@@ -437,12 +586,12 @@ void band_select() {
       }
       delay(DEBOUNCE);
       if (event == LONG) {
-        // for long press of <
+        // for long press of < button
         // exit band-select mode
-        done = TRUE;
+        done = YES;
         blink_mode();
       } else {
-        // for short click of <
+        // for short click of < button
         // increment the band slot
         band_slot = band_slot + 1;
         if (band_slot > MAX_SLOT) band_slot = MIN_SLOT;
@@ -452,7 +601,7 @@ void band_select() {
       while (RT_PRESSED);  // wait for release
       delay(DEBOUNCE);
     }
-    // check the tx pushbutton
+    // check the tx button
     if (TX_PRESSED) {
       t0 = millis();
       event = CLICK;
@@ -463,13 +612,13 @@ void band_select() {
         wait_ms(1);
       }
       if (event == LONG) {
-        // for long press of TX
+        // for long press of TX button
         // manual TX
         clrLED();
         manualTX();
         setLED(0, band_slot);  // display band
       } else {
-        // for short click of TX
+        // for short click of TX button
         // save the band slot to eeprom
         blinkTX();
         EEPROM.put(SLOT_ADDR, band_slot);
@@ -477,11 +626,178 @@ void band_select() {
         delay(DEBOUNCE);
         // exit band-select mode and
         // return to mode-select mode
-        done = TRUE;
+        done = YES;
         blink_mode();
       }
     }
   }
+}
+
+// frequency to band
+void freq2band() {
+  switch (freq) {
+    // 160M band
+    case 1842000:
+      band_slot = BAND80;
+      mode = JS8_MODE;
+      break;
+    // 80M band
+    case 3573000:
+      band_slot = BAND80;
+      mode = FT8_MODE;
+      break;
+    case 3575000:
+      band_slot = BAND80;
+      mode = FT4_MODE;
+      break;
+    case 3578000:
+      band_slot = BAND80;
+      mode = JS8_MODE;
+      break;
+    case 3568600:
+      band_slot = BAND80;
+      mode = WSP_MODE;
+      break;
+    // 40M band
+    case 7074000:
+      band_slot = BAND40;
+      mode = FT8_MODE;
+      break;
+    case 7047500:
+      band_slot = BAND40;
+      mode = FT4_MODE;
+      break;
+    case 7078000:
+      band_slot = BAND40;
+      mode = JS8_MODE;
+      break;
+    case 7038600:
+      band_slot = BAND40;
+      mode = WSP_MODE;
+      break;
+    // 30M band
+    case 10136000:
+      band_slot = BAND30;
+      mode = FT8_MODE;
+      break;
+    case 10140000:
+      band_slot = BAND30;
+      mode = FT4_MODE;
+      break;
+    case 10130000:
+      band_slot = BAND30;
+      mode = JS8_MODE;
+      break;
+    case 10138700:
+      band_slot = BAND30;
+      mode = WSP_MODE;
+      break;
+    // 20M band
+    case 14074000:
+      band_slot = BAND20;
+      mode = FT8_MODE;
+      break;
+    case 14080000:
+      band_slot = BAND20;
+      mode = FT4_MODE;
+      break;
+    case 14078000:
+      band_slot = BAND20;
+      mode = JS8_MODE;
+      break;
+    case 14095600:
+      band_slot = BAND20;
+      mode = WSP_MODE;
+      break;
+    // 17M band
+    case 18100000:
+      band_slot = BAND17;
+      mode = FT8_MODE;
+      break;
+    /*
+    case 18104000:
+      band_slot = BAND17;
+      mode = FT4_MODE;
+      break;
+    */
+    case 18104000:
+      band_slot = BAND17;
+      mode = JS8_MODE;
+      break;
+    case 18104600:
+      band_slot = BAND17;
+      mode = WSP_MODE;
+      break;
+    // 15M band
+    case 21074000:
+      band_slot = BAND15;
+      mode = FT8_MODE;
+      break;
+    case 21140000:
+      band_slot = BAND15;
+      mode = FT4_MODE;
+      break;
+    case 21078000:
+      band_slot = BAND15;
+      mode = JS8_MODE;
+      break;
+    case 21094600:
+      band_slot = BAND15;
+      mode = WSP_MODE;
+      break;
+    // 12M band
+    case 24915000:
+      band_slot = BAND12;
+      mode = FT8_MODE;
+      break;
+    case 24919000:
+      band_slot = BAND12;
+      mode = FT4_MODE;
+      break;
+    case 24922000:
+      band_slot = BAND12;
+      mode = JS8_MODE;
+      break;
+    case 24924600:
+      band_slot = BAND12;
+      mode = WSP_MODE;
+      break;
+    // 10M band
+    case 28074000:
+      band_slot = BAND10;
+      mode = FT8_MODE;
+      break;
+    case 28180000:
+      band_slot = BAND10;
+      mode = FT4_MODE;
+      break;
+    case 28078000:
+      band_slot = BAND10;
+      mode = JS8_MODE;
+      break;
+    case 28124600:
+      band_slot = BAND10;
+      mode = WSP_MODE;
+      break;
+    // 6M band
+    case 50313000:
+      band_slot = BAND06;
+      mode = FT8_MODE;
+      break;
+    case 50318000:
+      band_slot = BAND06;
+      mode = JS8_MODE;
+      break;
+    case 50293000:
+      band_slot = BAND06;
+      mode = WSP_MODE;
+      break;
+  }
+  // update the frequency
+  si5351.set_freq(freq*100, SI5351_CLK1);
+  base_freq = freq;
+  // display band
+  setLED(0, band_slot);
 }
 
 // manual TX
@@ -499,7 +815,7 @@ void manualTX() {
 // si5351 calibration
 void si5351_cal() {
   uint32_t cal_freq = 1000000UL;
-  bool done = FALSE;
+  bool done = NO;
   setLED(0b1111, 0);   // set all LEDs while button pressed
   wait4buttons();      // wait for all buttons released
   setLED(0b1001, 0);   // set LEDs to indicate cal mode
@@ -508,24 +824,24 @@ void si5351_cal() {
   si5351.set_clock_pwr(SI5351_CLK2, 1);
   si5351.output_enable(SI5351_CLK2, 1);
   while (!done) {
-    // check the tx pushbutton
+    // check the tx button
     if (TX_PRESSED) {
       // if TX pressed then
       // save the calibration data
       // and exit calibration mode
-      done = TRUE;
+      done = YES;
       clrLED();            // clear all LEDs
       while (TX_PRESSED);  // wait for release
       delay(DEBOUNCE);
     }
-    // check the > pushbutton
+    // check the > button
     else if (RT_PRESSED) {
       cal_data = cal_data - 100;
       si5351.set_correction(cal_data, SI5351_PLL_INPUT_XO);
       si5351.set_freq(cal_freq*100, SI5351_CLK2);
       delay(DEBOUNCE);
     }
-    // check the < pushbutton
+    // check the < button
     else if (LT_PRESSED) {
       cal_data = cal_data + 100;
       si5351.set_correction(cal_data, SI5351_PLL_INPUT_XO);
@@ -592,9 +908,17 @@ void rx_mode() {
   digitalWrite(RXGATE, ON);
 }
 
+// print an 11-digit frequency
+void printVFO() {
+  if      (freq >= 10000000) Serial.print("000");
+  else if (freq >=  1000000) Serial.print("0000");
+  else                       Serial.print("00000");
+  Serial.print(freq);
+}
+
 // check the UI buttons
 void check_UI() {
-  // check the < pushbutton
+  // check the < button
   if (LT_PRESSED) {
     t0 = millis();
     event = CLICK;
@@ -605,11 +929,11 @@ void check_UI() {
       wait_ms(1);
     }
     if (event == LONG) {
-      // for long press of <
+      // for long press of < button
       // goto band-select mode
       band_select();
     } else {
-      // for short click of <
+      // for short click of < button
       // left-shift the radio mode
       mode = mode<<1;
       if (mode > MAX_MODE) mode = MIN_MODE; // wrap
@@ -619,16 +943,37 @@ void check_UI() {
     while (LT_PRESSED);  // wait for release
     delay(DEBOUNCE);
   }
-  // check the > pushbutton
+  // check the > button
   if (RT_PRESSED) {
-    mode = mode>>1;
-    if (mode < MIN_MODE) mode = MAX_MODE; // wrap
-    mode_assign();
-    setLED(mode, 0);     // display mode
+    t0 = millis();
+    event = CLICK;
+    // wait for release
+    while (RT_PRESSED) {
+      // check for long press
+      if ((millis() - t0) > MS_LONG) { event = LONG; break; }
+      wait_ms(1);
+    }
+    if (event == LONG) {
+      // for long press of > button
+      // turn on CAT mode and blink LEDs
+      cat_mode = ON;
+      cylon(LEFT);
+      delay(500);
+      blink_mode();    // blink mode on LEDs
+      delay(500);
+      blink_band();    // blink band on LEDs
+    } else {
+      // for short click of > button
+      // right-shift the radio mode
+      mode = mode>>1;
+      if (mode < MIN_MODE) mode = MAX_MODE; // wrap
+      mode_assign();
+      setLED(mode, 0);   // display mode
+    }
     while (RT_PRESSED);  // wait for release
     delay(DEBOUNCE);
   }
-  // check the tx pushbutton
+  // check the tx button
   if (TX_PRESSED) {
     t0 = millis();
     event = CLICK;
@@ -639,13 +984,13 @@ void check_UI() {
       wait_ms(1);
     }
     if (event == LONG) {
-      // for long press of TX
+      // for long press of TX button
       // manual TX
       clrLED();
       manualTX();
       setLED(mode, 0);  // display mode
     } else {
-      // for short click of TX
+      // for short click of TX button
       // save the radio mode
       blinkTX();
       setLED(mode, 0);  // display mode
@@ -654,6 +999,140 @@ void check_UI() {
       while (TX_PRESSED);
       delay(DEBOUNCE);
     }
+  }
+}
+
+// check for CAT control
+void check_CAT() {
+  if (Serial.available()) CAT_control();
+  // check the > button
+  if (RT_PRESSED) {
+    t0 = millis();
+    event = CLICK;
+    // wait for release
+    while (RT_PRESSED) {
+      // check for long press
+      if ((millis() - t0) > MS_LONG) { event = LONG; break; }
+      wait_ms(1);
+    }
+    if (event == LONG) {
+      // for long press of > button
+      // turn off CAT mode and blink LEDs
+      cat_mode = OFF;
+      cylon(RIGHT);
+      delay(500);
+      blink_mode();    // blink mode on LEDs
+      delay(500);
+      blink_band();    // blink band on LEDs
+    } else {
+      // for short click of > button
+      // display band
+      setLED(0, band_slot);
+    }
+    while (RT_PRESSED);  // wait for release
+    delay(DEBOUNCE);
+  }
+  // check the < button
+  if (LT_PRESSED) {
+    t0 = millis();
+    event = CLICK;
+    // wait for release
+    while (LT_PRESSED) {
+      // check for long press
+      if ((millis() - t0) > MS_LONG) { event = LONG; break; }
+      wait_ms(1);
+    }
+    if (event == LONG) {
+      // do nothing
+    } else {
+      // for short click of > button
+      // display mode
+      setLED(mode, 0);
+    }
+    while (LT_PRESSED);  // wait for release
+    delay(DEBOUNCE);
+  }
+}
+
+uint8_t CAT_tx = OFF;
+
+// The following CAT commands are implemented
+//
+// command get/set  name              operation
+// ------- -------  ----------------  -----------------------
+// FA        G S    frequency         gets or sets the ADX frequency
+// IF        G      radio status      returns frequency and other status
+// AI        G      auto-information  returns 0
+// ID        G      radio ID          returns 019 = Kenwood TS2000
+// MD        G      radio mode        returns 2   = USB
+// PS        G      power-on status   returns 1
+// TX        G      transmit          returns 0 and set TX LED
+// RX        G      receive           returns 0 and clears TX LED
+//
+void CAT_control() {
+  char cmd1[3] = "AA";
+  char cmd2[3] = "AA";
+  char param[20] = "";
+
+  // get next alpha char from serial buffer
+  char ch = gnac();
+  if (ch == 'z') return;  // non-alpha char
+
+  // get the command
+  cmd1[0] = ch;
+  cmd1[1] = getc();
+  uppercase(cmd1);
+
+  // set or report frequency
+  if (cmpstr(cmd1, "FA")) {
+    ch = getc();
+    if (numeric(ch)) {
+      // set frequency
+      catstr(param, ch);
+      for (uint8_t i=0; i<10; i++) {
+        catstr(param, getc());
+      }
+      freq = fs2int(param);
+      // set band and mode
+      freq2band();
+    } else {
+      // report frequency
+      Serial.print("FA");
+      printVFO();
+      Serial.print(";");
+    }
+  }
+
+  // report frequency and other status
+  if (cmpstr(cmd1, "IF")) {
+    Serial.print("IF");
+    printVFO();
+    Serial.print("00000+000000000");
+    if (CAT_tx) Serial.print("1");
+    else Serial.print("0");
+    Serial.print("20000000;");
+  }
+
+  // report auto-information status
+  else if (cmpstr(cmd1, "AI")) Serial.print("AI0;");
+  // report radio ID
+  else if (cmpstr(cmd1, "ID")) Serial.print("ID019;");
+  // report radio mode
+  else if (cmpstr(cmd1, "MD")) Serial.print("MD2;");
+  // report power-on status
+  else if (cmpstr(cmd1, "PS")) Serial.print("PS1;");
+
+  // CAT transmit
+  else if (cmpstr(cmd1, "TX")) {
+    Serial.print("TX0;");
+    digitalWrite(TXXLED, ON);
+    CAT_tx = ON;
+  }
+  // CAT receive
+  else if (cmpstr(cmd1, "RX")) {
+    Serial.print("RX0;");
+    digitalWrite(TXXLED, OFF);
+    CAT_tx = OFF;
   }
 }
 
@@ -750,6 +1229,9 @@ void setup() {
 void loop() {
   if (EVENT) FSK_tone();   // check for FSK tone input
   if (FSKtx) check_VOX();  // check for VOX timeout
-  else check_UI();         // check UI buttons
+  else {
+    if (!cat_mode) check_UI(); // check UI buttons
+    else check_CAT();          // check for CAT commands
+  }
 }
 
