@@ -46,8 +46,8 @@
 // ============================================================================
 
 #define DEBUG     0                     // set to 1 for debugging
-#define VERSION   "ADX-MINI 1.04b"      // firmware version
-#define DATE      "Apr 12 2023"         // firmware date
+#define VERSION   "ADX-MINI 1.04c"      // firmware version
+#define DATE      "Apr 21 2023"         // firmware date
 #define NOTE1     "with CAT support"    // firmware notes
 
 // Arduino Pins
@@ -79,6 +79,8 @@
 // string prototype defs
 char getc();
 char gnac();
+void getsemi();
+char gcal(char ch);
 uint8_t len(char *str);
 uint8_t cmpstr(char *dst, char *src);
 uint8_t alpha(char ch);
@@ -96,6 +98,7 @@ void blinkTX();
 void setLED(uint8_t data, uint8_t band);
 void blink_band();
 void blink_mode();
+void blink_both();
 void set_all();
 void clr_all();
 void blink_all();
@@ -118,6 +121,10 @@ void read_eeprom();
 void init_VFO();
 void init_timer();
 void initPins();
+void print_band();
+void print_mode();
+void factory_reset();
+void calibrate_mode();
 
 // eeprom addresses
 #define DATA_ADDR    10
@@ -201,18 +208,6 @@ const int8_t bandENC[11] = {
 #define CAL_DATA_INIT  64000ULL
 uint32_t cal_data = CAL_DATA_INIT;
 
-// CAT mode
-uint8_t cat_mode = OFF;
-
-// FSK transmit status
-uint8_t FSKtx = FALSE;
-
-// data valid status
-uint8_t d2ICR = FALSE;
-
-// CPU clock frequency
-#define CPUXTL  1600000000ULL
-
 #define MAX_MODE 8
 #define MIN_MODE 1
 #define MAX_SLOT 11
@@ -225,8 +220,32 @@ uint8_t d2ICR = FALSE;
 
 uint8_t mode      = FT8_MODE;
 uint8_t band_slot = BAND20;
+uint8_t cat_mode  = OFF;
 
 Si5351 si5351;
+
+#define CPUXTL  1600000000ULL // CPU clock
+#define MAXCNT  64000  // max event period
+#define MAXVOX  15     // VOX timeout (ms)
+
+volatile uint8_t  d2ICR = FALSE;
+volatile uint8_t  doFSK = NO;
+volatile uint16_t d1;
+volatile uint16_t d2;
+
+// timer1 input capture interrupt routine
+ISR (TIMER1_CAPT_vect) {
+  // check if d2 is valid
+  if (!d2ICR) {
+    d2 = ICR1;
+    d2ICR = TRUE;
+    doFSK = NO;
+  } else {
+    d1 = d2;
+    d2 = ICR1;
+    doFSK = YES;
+  }
+}
 
 // read char from the serial port
 char getc() {
@@ -244,6 +263,34 @@ char gnac() {
       if (alpha(ch)) return(ch);
     } else {
       if (tc++ > 1024) return('z');
+    }
+  }
+}
+
+// wait for semicolon from serial buffer
+void getsemi() {
+  char ch;
+  while (TRUE) {
+    if (Serial.available()) {
+      ch = Serial.read();
+      if (ch == ';') return;
+    }
+  }
+}
+
+// get + or - char from serial buffer
+char gcal(char ch) {
+  char new_ch;
+  uint16_t tc = 0;  // for timeout
+  while (TRUE) {
+    if (Serial.available()) {
+      new_ch = Serial.read();
+      if ((new_ch=='+')||(new_ch=='-')||
+          (new_ch=='=')||(new_ch=='.')){
+        return(new_ch);
+      }
+    } else {
+      if (tc++ > 1024) return(ch);
     }
   }
 }
@@ -300,11 +347,16 @@ uint32_t fs2int(char *str) {
 
 // print the firmware version
 void print_version() {
-  Serial.print("\n\n");
+  Serial.println('\n');
   Serial.println(VERSION);
   Serial.println(DATE);
   Serial.println(NOTE1);
-  Serial.print("\n\n");
+}
+
+// send a string
+void send(char *str) {
+  getsemi(); // get semicolon
+  Serial.print(str);
 }
 
 // interruptable delay
@@ -376,6 +428,13 @@ void blink_mode() {
   }
 }
 
+// blink band then mode
+void blink_both() {
+  blink_band();  // blink band on LEDs
+  delay(500);
+  blink_mode();  // blink mode on LEDs
+}
+
 // set all LEDs
 void set_all() {
   digitalWrite(FT8LED, ON);
@@ -430,6 +489,8 @@ void cylon(uint8_t left) {
   }
   delay(500);
   clr_all();
+  delay(500);
+  blink_both();  // blink band then mode on LEDs
 }
 
 // mode assignments
@@ -614,7 +675,6 @@ void band_select() {
       if (event == LONG) {
         // for long press of TX button
         // manual TX
-        clrLED();
         manualTX();
         setLED(0, band_slot);  // display band
       } else {
@@ -624,8 +684,7 @@ void band_select() {
         EEPROM.put(SLOT_ADDR, band_slot);
         while (TX_PRESSED);  // wait for release
         delay(DEBOUNCE);
-        // exit band-select mode and
-        // return to mode-select mode
+        // exit band-select mode
         done = YES;
         blink_mode();
       }
@@ -804,6 +863,7 @@ void freq2band() {
 void manualTX() {
   digitalWrite(RXGATE, OFF);
   si5351.output_enable(SI5351_CLK1, 0);   // RX off
+  clrLED();
   digitalWrite(TXXLED, ON);
   si5351.set_freq(base_freq*100, SI5351_CLK0);
   si5351.output_enable(SI5351_CLK0, 1);   // TX on
@@ -856,42 +916,36 @@ void si5351_cal() {
   rx_mode();  // put radio in rx mode
 }
 
-#define MAXVOX  15     // VOX timeout (ms)
+uint8_t  FSKtx = FALSE;
+uint8_t  tx_status = OFF;
 uint32_t vox_timer;
 
-#define MAXCNT  64000  // max timer1 count
-
-// FSK zero-crossing frequency detection
 void FSK_tone() {
-  static uint16_t d1,d2;
-  // check if d2 is valid
-  if (!d2ICR) {
-    d2 = ICR1;
-    d2ICR = TRUE;
-    return;
-  }
-  d1 = d2;
-  d2 = ICR1;
-  TIFR1 = (1<<ICF1);            // write one to clear
-  uint16_t delta = d2 - d1;     // captured event period
-  if (delta < MAXCNT) {         // check for valid period
+  if (!doFSK) return;
+  doFSK = NO;
+  // noInterrupts();
+  // FSK frequency measurement
+  uint16_t delta = d2 - d1;  // captured event period
+  vox_timer = millis();      // reset the vox timer
+  if (delta < MAXCNT) {      // check for valid period
     if (!FSKtx) {
       clrLED();
       digitalWrite(TXXLED, ON);
+      tx_status = ON;
       digitalWrite(RXGATE, OFF);
-      si5351.output_enable(SI5351_CLK1, 0);   // RX off
-      si5351.output_enable(SI5351_CLK0, 1);   // TX on
+      si5351.output_enable(SI5351_CLK1, 0);  // RX off
+      si5351.output_enable(SI5351_CLK0, 1);  // TX on
       FSKtx = TRUE;
     }
     uint32_t codefreq = CPUXTL/delta;
     si5351.set_freq(((freq*100) + codefreq), SI5351_CLK0);
+    vox_timer = millis();    // reset the vox timer
   }
-  vox_timer = millis();  // reset the vox timer
 }
 
 // if VOX timeout then return to rx mode
 void check_VOX() {
-  if ((FSKtx) && (millis() - vox_timer > MAXVOX)) {
+  if (FSKtx && (millis() - vox_timer > MAXVOX)) {
     FSKtx = FALSE;
     d2ICR = FALSE;
     rx_mode();
@@ -902,6 +956,7 @@ void check_VOX() {
 // put radio in rx mode
 void rx_mode() {
   digitalWrite(TXXLED, OFF);
+  tx_status = OFF;
   si5351.output_enable(SI5351_CLK0, 0);   // TX off
   si5351.set_freq(base_freq*100, SI5351_CLK1);
   si5351.output_enable(SI5351_CLK1, 1);   // RX on
@@ -958,10 +1013,6 @@ void check_UI() {
       // turn on CAT mode and blink LEDs
       cat_mode = ON;
       cylon(LEFT);
-      delay(500);
-      blink_mode();    // blink mode on LEDs
-      delay(500);
-      blink_band();    // blink band on LEDs
     } else {
       // for short click of > button
       // right-shift the radio mode
@@ -1020,10 +1071,6 @@ void check_CAT() {
       // turn off CAT mode and blink LEDs
       cat_mode = OFF;
       cylon(RIGHT);
-      delay(500);
-      blink_mode();    // blink mode on LEDs
-      delay(500);
-      blink_band();    // blink band on LEDs
     } else {
       // for short click of > button
       // display band
@@ -1054,24 +1101,22 @@ void check_CAT() {
   }
 }
 
-uint8_t CAT_tx = OFF;
-
 // The following CAT commands are implemented
 //
 // command get/set  name              operation
 // ------- -------  ----------------  -----------------------
+// IF        G -    radio status      returns frequency and other status
+// ID        G -    radio ID          returns 019 = Kenwood TS2000
 // FA        G S    frequency         gets or sets the ADX frequency
-// IF        G      radio status      returns frequency and other status
-// AI        G      auto-information  returns 0
-// ID        G      radio ID          returns 019 = Kenwood TS2000
-// MD        G      radio mode        returns 2   = USB
-// PS        G      power-on status   returns 1
-// TX        G      transmit          returns 0 and set TX LED
-// RX        G      receive           returns 0 and clears TX LED
+// AI        G S    auto-information  returns 0   = OFF
+// MD        G S    radio mode        returns 2   = USB
+// PS        G S    power-on status   returns 1   = ON
+// XT        G S    XIT status        returns 0   = OFF
+// TX        - S    transmit          returns 0 and set TX LED
+// RX        - S    receive           returns 0 and clears TX LED
 //
 void CAT_control() {
-  char cmd1[3] = "AA";
-  char cmd2[3] = "AA";
+  char cmd1[3] = "zz";
   char param[20] = "";
 
   // get next alpha char from serial buffer
@@ -1083,8 +1128,21 @@ void CAT_control() {
   cmd1[1] = getc();
   uppercase(cmd1);
 
-  // set or report frequency
-  if (cmpstr(cmd1, "FA")) {
+  // get frequency and other status
+  if (cmpstr(cmd1, "IF")) {
+    send("IF");
+    printVFO();
+    Serial.print("00000+000000000");
+    if (tx_status) Serial.print('1');
+    else Serial.print('0');
+    Serial.print("20000000;");
+  }
+
+  // get radio ID
+  else if (cmpstr(cmd1, "ID")) send("ID019;");
+
+  // get or set frequency
+  else if (cmpstr(cmd1, "FA")) {
     ch = getc();
     if (numeric(ch)) {
       // set frequency
@@ -1095,45 +1153,92 @@ void CAT_control() {
       freq = fs2int(param);
       // set band and mode
       freq2band();
+      getsemi(); // get semicolon
     } else {
-      // report frequency
+      // get frequency
       Serial.print("FA");
       printVFO();
       Serial.print(";");
     }
   }
 
-  // report frequency and other status
-  if (cmpstr(cmd1, "IF")) {
-    Serial.print("IF");
-    printVFO();
-    Serial.print("00000+000000000");
-    if (CAT_tx) Serial.print("1");
-    else Serial.print("0");
-    Serial.print("20000000;");
+  // get or set the radio mode
+  else if (cmpstr(cmd1, "MD")) {
+    ch = getc();
+    if (numeric(ch)) {
+      // set radio mode
+      // does nothing .. always 2
+      getsemi();
+    } else {
+      // get auto-information status
+      Serial.print("MD2;");
+    }
   }
 
-  // report auto-information status
-  else if (cmpstr(cmd1, "AI")) Serial.print("AI0;");
-  // report radio ID
-  else if (cmpstr(cmd1, "ID")) Serial.print("ID019;");
-  // report radio mode
-  else if (cmpstr(cmd1, "MD")) Serial.print("MD2;");
-  // report power-on status
-  else if (cmpstr(cmd1, "PS")) Serial.print("PS1;");
+  // get or set auto-information status
+  else if (cmpstr(cmd1, "AI")) {
+    ch = getc();
+    if (numeric(ch)) {
+      // set auto-information status
+      // does nothing .. always 0
+      getsemi();
+    } else {
+      // get auto-information status
+      Serial.print("AI0;");
+    }
+  }
+
+  // get or set the power (ON/OFF) status
+  else if (cmpstr(cmd1, "PS")) {
+    ch = getc();
+    if (numeric(ch)) {
+      // set power (ON/OFF) status
+      // does nothing .. always 1
+      getsemi();
+    } else {
+      // get power (ON/OFF) status
+      Serial.print("PS1;");
+    }
+  }
+
+  // get or set the XIT (ON/OFF) status
+  else if (cmpstr(cmd1, "XT")) {
+    ch = getc();
+    if (numeric(ch)) {
+      // set XIT (ON/OFF) status
+      // does nothing .. always OFF
+      getsemi();
+    } else {
+      // get XIT (ON/OFF) status
+      Serial.print("XT0;");
+    }
+  }
 
   // CAT transmit
   else if (cmpstr(cmd1, "TX")) {
-    Serial.print("TX0;");
-    digitalWrite(TXXLED, ON);
-    CAT_tx = ON;
+    getsemi(); // get semicolon
+    tx_status = ON;
   }
+
   // CAT receive
   else if (cmpstr(cmd1, "RX")) {
-    Serial.print("RX0;");
-    digitalWrite(TXXLED, OFF);
-    CAT_tx = OFF;
+    getsemi(); // get semicolon
+    tx_status = OFF;
   }
+
+  // ===========================
+  //  ADX-specific CAT commands
+  // ===========================
+
+  // factory reset
+  else if (cmpstr(cmd1, "FR")) {
+    factory_reset();
+  }
+  // calibrate mode
+  else if (cmpstr(cmd1, "CM")) {
+    calibrate_mode();
+  }
+
 }
 
 // write to the eeprom
@@ -1177,10 +1282,11 @@ void init_VFO() {
 
 // initialize the timer
 void init_timer() {
-  TCCR1A = 0x00;
-  TCCR1B = 0x81;      // falling edge capture + noise canceller
-  ACSR |= (1<<ACIC);  // analog comparator input capture
-  TIFR1 = (1<<ICF1);  // write one to clear
+  TCCR1A = 0x00;       // OC1A/OC1B disconnected
+  TCCR1B = 0x81;       // falling edge capture + noise canceller
+  ACSR  |= (1<<ACIC);  // analog comparator input capture
+  TIFR1  = (1<<ICF1);  // clear interrupt flag
+  TIMSK1 = (1<<ICIE1); // enable timer1 capture event interrupt
 }
 
 // initialize pins
@@ -1203,12 +1309,116 @@ void initPins() {
   digitalWrite(RXGATE, OFF);
 }
 
-#define BAUD  115200
+// debug print of current band
+void print_band() {
+  const char* band_label[]  = {
+  "??",   "6M", "10M", "12M", "15M", "17M",
+  "20M", "30M", "40M", "60M", "80M", "160M" };
+  Serial.print("band = ");
+  Serial.println(band_label[band_slot]);
+}
+
+// debug print of current mode
+void print_mode() {
+  Serial.print("mode = ");
+  switch (mode) {
+    case WSP_MODE:
+      Serial.println("WSPR");
+      break;
+    case JS8_MODE:
+      Serial.println("JS8");
+      break;
+    case FT4_MODE:
+      Serial.println("FT4");
+      break;
+    case FT8_MODE:
+      Serial.println("FT8");
+      break;
+    default:
+      break;
+  }
+}
+
+// factory reset (CAT command)
+void factory_reset() {
+  cal_data = CAL_DATA_INIT;
+  band_slot = BAND20;
+  mode = FT8_MODE;
+  save_eeprom();
+  Serial.println('\n');
+  Serial.println("factory reset");
+  print_band();
+  print_mode();
+  band_assign();
+  blink_both();  // blink band then mode on LEDs
+}
+
+// calibrate si5351 (CAT command)
+void calibrate_mode() {
+  char ch;
+  uint8_t up = FALSE;
+  uint8_t dn = FALSE;
+  uint8_t xx = 0;
+  bool done = NO;
+  uint32_t cal_freq = 1000000UL;
+  setLED(0b1111, 0);   // set all LEDs
+  delay(500);
+  setLED(0b1001, 0);   // set LEDs to indicate cal mode
+  Serial.println('\n');
+  Serial.println("calibration mode");
+  Serial.println("press + to increase cal frequency");
+  Serial.println("press - to decrease cal frequency");
+  Serial.println("press = to stop");
+  Serial.println("press . to save and exit");
+  si5351.drive_strength(SI5351_CLK2, SI5351_DRIVE_2MA);
+  si5351.set_freq(cal_freq*100, SI5351_CLK2);
+  si5351.set_clock_pwr(SI5351_CLK2, 1);
+  si5351.output_enable(SI5351_CLK2, 1);
+  while (!done) {
+    ch = gcal(ch);
+    switch (ch) {
+      case '+':      // increment
+        up = TRUE;
+        dn = FALSE;
+        break;
+      case '-':      // decrement
+        up = FALSE;
+        dn = TRUE;
+        break;
+      case '=':      // stop
+        up = FALSE;
+        dn = FALSE;
+        break;
+      case '.':      // exit
+        done = TRUE;
+        up = FALSE;
+        dn = FALSE;
+        break;
+      default:
+        break;
+    }
+    if (up||dn) {
+      if (up) cal_data = cal_data - 10;
+      if (dn) cal_data = cal_data + 10;
+      si5351.set_correction(cal_data, SI5351_PLL_INPUT_XO);
+      si5351.set_freq(cal_freq*100, SI5351_CLK2);
+      if (xx == 0) Serial.print(ch);
+      if (xx++ == 100) xx = 0;
+    }
+  }
+  si5351.output_enable(SI5351_CLK2, 0);
+  si5351.set_clock_pwr(SI5351_CLK2, 0);
+  EEPROM.put(DATA_ADDR, cal_data);
+  Serial.println(' ');
+  Serial.println("exiting calibration mode");
+  blinkTX();  // blink TX LED when done
+  rx_mode();  // put radio in rx mode
+}
 
 // Arduino setup function
 void setup() {
   initPins();
-  Serial.begin(BAUD);
+  Serial.begin(115200);
   print_version();
   // if < button active then factory reset
   // if > button active then calibrate
@@ -1217,21 +1427,15 @@ void setup() {
   init_VFO();
   if (RT_PRESSED) si5351_cal();
   init_timer();
-  blink_band();    // blink band on LEDs
-  delay(500);
-  blink_mode();    // blink mode on LEDs
+  blink_both();    // blink band then mode on LEDs
   wait4buttons();  // wait for all buttons released
 }
 
-#define EVENT (TIFR1 & (1<<ICF1))  // capture event
-
 // Arduino main loop
 void loop() {
-  if (EVENT) FSK_tone();   // check for FSK tone input
+  FSK_tone();
   if (FSKtx) check_VOX();  // check for VOX timeout
-  else {
-    if (!cat_mode) check_UI(); // check UI buttons
-    else check_CAT();          // check for CAT commands
-  }
+  if (cat_mode) check_CAT();
+  else check_UI();
 }
 
