@@ -5,9 +5,15 @@
 //
 // This control program was derived from the ADX control program.
 // It is compatible with ADX, ADX-UNO, and ADX-MINI hardware.
-// The user interface code has been modified to encode the band selection
-// Supported bands are: 160m/80m/60m/40m/30m/20m/17m/15m/12m/10m/6m
+// Supported bands are: 160M/80M/60M/40M/30M/20M/17M/15M/12M/10M/6M
 // The user interface is described in a separate document.
+//
+// (c) Scott Baker KJ7NLA
+//
+//  Arduino IDE settings:
+//  board: Arduino UNO
+//  bootloader: no bootloader
+//  programmer: AVRISP mkII
 //
 // Libraries
 // ---------
@@ -19,8 +25,8 @@
 // ---------------
 // The Arduino Digital Transceiver (ADX) hardware was designed by WB2CBA
 // The ADX is a simple QRP radio in both its hardware implmentation and
-// its user interface (3 buttons and 5 LEDs :) Yet it is highly capable
-// when paired with the WSJT-X software.  Thanks Barb !!
+// its user interface. Yet it is highly capable when paired with
+// the WSJT-X software.  Thanks Barb !!
 //
 // License
 // -------
@@ -45,9 +51,10 @@
 //
 // ============================================================================
 
-#define DEBUG     0                     // set to 1 for debugging
-#define VERSION   "ADX-MINI 1.04c"      // firmware version
-#define DATE      "Apr 21 2023"         // firmware date
+#define DEBUG1    0                     // set to 1 for debug level 1
+#define DEBUG2    0                     // set to 1 for debug level 2
+#define VERSION   "ADX-MINI 1.04d"      // firmware version
+#define DATE      "Jul 29 2023"         // firmware date
 #define NOTE1     "with CAT support"    // firmware notes
 
 // Arduino Pins
@@ -67,6 +74,8 @@
 #define ON    1
 #define NO    0
 #define YES   1
+#define RX    0
+#define TX    1
 #define FALSE 0
 #define TRUE  1
 #define RIGHT 0
@@ -95,7 +104,9 @@ void wait_ms(uint16_t dly);
 void clrLED();
 void blinkLED(uint8_t pin, uint8_t x);
 void blinkTX();
-void setLED(uint8_t data, uint8_t band);
+void setLED(uint8_t data);
+void display_band();
+void display_mode();
 void blink_band();
 void blink_mode();
 void blink_both();
@@ -112,9 +123,9 @@ void si5351_cal();
 void FSK_tone();
 void check_VOX();
 void rx_mode();
-void printVFO();
 void check_UI();
 void check_CAT();
+void CAT_VFO();
 void CAT_control();
 void save_eeprom();
 void read_eeprom();
@@ -123,14 +134,16 @@ void init_timer();
 void initPins();
 void print_band();
 void print_mode();
+void print_cat_mode();
+void print_cal_data();
 void factory_reset();
 void calibrate_mode();
 
 // eeprom addresses
 #define DATA_ADDR    10
-#define TEMP_ADDR    30
-#define MODE_ADDR    40
-#define SLOT_ADDR    50
+#define MODE_ADDR    20
+#define BAND_ADDR    30
+#define CATX_ADDR    40
 
 // delay times (ms)
 #define DLY1        250
@@ -144,8 +157,8 @@ uint32_t t0;             // event timer
 #define RT_PRESSED  !digitalRead(RTSW)
 #define TX_PRESSED  !digitalRead(TXSW)
 
-uint32_t freq;
 uint32_t base_freq;
+
 uint32_t F_FT8;
 uint32_t F_FT4;
 uint32_t F_JS8;
@@ -184,8 +197,9 @@ uint8_t event = NONE;
 #define BAND12    3
 #define BAND10    2
 #define BAND06    1
+#define UNKNOWN   0
 
-// encoded band LEDs
+// encoded bands
 #define ENC160m GROUP3|XBAND3
 #define ENC80m  GROUP3|XBAND2
 #define ENC60m  GROUP3|XBAND1
@@ -197,12 +211,12 @@ uint8_t event = NONE;
 #define ENC12m  GROUP1|XBAND2
 #define ENC10m  GROUP1|XBAND1
 #define ENC6m   GROUP0|XBAND3
+#define ENC0m   GROUP0|XBAND0
 
-// encoded bands
-const int8_t bandENC[11] = {
- ENC6m,  ENC10m, ENC12m, ENC15m, ENC17m,
- ENC20m, ENC30m, ENC40m, ENC60m, ENC80m,
- ENC160m };
+const int8_t bandENC[12] = {
+ ENC0m,  ENC6m,  ENC10m, ENC12m, ENC15m,
+ ENC17m, ENC20m, ENC30m, ENC40m, ENC60m,
+ ENC80m, ENC160m };
 
 // calibration data
 #define CAL_DATA_INIT  64000ULL
@@ -210,17 +224,17 @@ uint32_t cal_data = CAL_DATA_INIT;
 
 #define MAX_MODE 8
 #define MIN_MODE 1
-#define MAX_SLOT 11
-#define MIN_SLOT 1
+#define MAX_BAND 11
+#define MIN_BAND 1
 
 #define WSP_MODE 8
 #define JS8_MODE 4
 #define FT4_MODE 2
 #define FT8_MODE 1
 
-uint8_t mode      = FT8_MODE;
-uint8_t band_slot = BAND20;
-uint8_t cat_mode  = OFF;
+uint8_t mode = FT8_MODE;
+uint8_t band = BAND20;
+uint8_t cat_mode = OFF;
 
 Si5351 si5351;
 
@@ -400,12 +414,22 @@ void blinkTX() {
 }
 
 // set LEDs with data
-void setLED(uint8_t data, uint8_t band) {
-  if (band) data = bandENC[band-1];
+void setLED(uint8_t data) {
   digitalWrite(FT8LED, bitRead(data, 0));
   digitalWrite(FT4LED, bitRead(data, 1));
   digitalWrite(JS8LED, bitRead(data, 2));
   digitalWrite(WSPLED, bitRead(data, 3));
+}
+
+// set LEDs with the encoded band
+void display_band() {
+  uint8_t data = bandENC[band];
+  setLED(data);
+}
+
+// set LEDs with the digital mode
+void display_mode() {
+  setLED(mode);
 }
 
 // blink the selected band
@@ -413,7 +437,7 @@ void blink_band() {
   for (uint8_t i=0; i<2; i++) {
     clrLED();
     delay(DLY1);
-    setLED(0, band_slot);  // display band
+    display_band();
     delay(DLY1);
   }
 }
@@ -423,7 +447,7 @@ void blink_mode() {
   for (uint8_t i=0; i<2; i++) {
     clrLED();
     delay(DLY1);
-    setLED(mode, 0);  // display mode
+    display_mode();
     delay(DLY1);
   }
 }
@@ -511,13 +535,12 @@ void mode_assign() {
     default:
       break;
   }
-  freq = base_freq;
   rx_mode();
 }
 
 // band frequency assignments
 void band_assign() {
-  switch (band_slot) {
+  switch (band) {
     case BAND160:
       // 160M band
       F_FT8 = 1842000;
@@ -626,10 +649,10 @@ void band_select() {
         blink_mode();
       } else {
         // for short click of < button
-        // decrement the band slot
-        band_slot = band_slot - 1;
-        if (band_slot < MIN_SLOT) band_slot = MAX_SLOT;
-        setLED(0, band_slot);  // display band
+        // decrement the band
+        band = band - 1;
+        if (band < MIN_BAND) band = MAX_BAND;
+        display_band();
         band_assign();
       }
       while (LT_PRESSED);  // wait for release
@@ -653,10 +676,10 @@ void band_select() {
         blink_mode();
       } else {
         // for short click of < button
-        // increment the band slot
-        band_slot = band_slot + 1;
-        if (band_slot > MAX_SLOT) band_slot = MIN_SLOT;
-        setLED(0, band_slot);  // display band
+        // increment the band
+        band = band + 1;
+        if (band > MAX_BAND) band = MIN_BAND;
+        display_band();
         band_assign();
       }
       while (RT_PRESSED);  // wait for release
@@ -676,12 +699,12 @@ void band_select() {
         // for long press of TX button
         // manual TX
         manualTX();
-        setLED(0, band_slot);  // display band
+        display_band();
       } else {
         // for short click of TX button
-        // save the band slot to eeprom
+        // save the band to eeprom
         blinkTX();
-        EEPROM.put(SLOT_ADDR, band_slot);
+        EEPROM.put(BAND_ADDR, band);
         while (TX_PRESSED);  // wait for release
         delay(DEBOUNCE);
         // exit band-select mode
@@ -694,169 +717,169 @@ void band_select() {
 
 // frequency to band
 void freq2band() {
-  switch (freq) {
+  band = UNKNOWN;
+  mode = UNKNOWN;
+  // lookup the band
+  if ((base_freq > 50000000) && (base_freq < 54000000)) {
+    band = BAND06;
+  } else if ((base_freq > 28000000) && (base_freq < 29700000)) {
+    band = BAND10;
+  } else if ((base_freq > 24890000) && (base_freq < 24990000)) {
+    band = BAND12;
+  } else if ((base_freq > 21000000) && (base_freq < 21450000)) {
+    band = BAND15;
+  } else if ((base_freq > 18070000) && (base_freq < 18170000)) {
+    band = BAND17;
+  } else if ((base_freq > 14000000) && (base_freq < 14350000)) {
+    band = BAND20;
+  } else if ((base_freq > 10100000) && (base_freq < 10150000)) {
+    band = BAND30;
+  } else if ((base_freq >  7000000) && (base_freq <  7300000)) {
+    band = BAND40;
+  } else if ((base_freq >  5300000) && (base_freq <  5500000)) {
+    band = BAND60;
+  } else if ((base_freq >  3500000) && (base_freq <  4000000)) {
+    band = BAND80;
+  } else if ((base_freq >  1800000) && (base_freq <  2000000)) {
+    band = BAND160;
+  }
+  // lookup the mode
+  switch (base_freq) {
     // 160M band
+    case 1840000:
+      mode = FT8_MODE;
+      break;
     case 1842000:
-      band_slot = BAND80;
       mode = JS8_MODE;
+      break;
+    case 1836000:
+      mode = WSP_MODE;
       break;
     // 80M band
     case 3573000:
-      band_slot = BAND80;
       mode = FT8_MODE;
       break;
     case 3575000:
-      band_slot = BAND80;
       mode = FT4_MODE;
       break;
     case 3578000:
-      band_slot = BAND80;
       mode = JS8_MODE;
       break;
     case 3568600:
-      band_slot = BAND80;
       mode = WSP_MODE;
       break;
     // 40M band
     case 7074000:
-      band_slot = BAND40;
       mode = FT8_MODE;
       break;
     case 7047500:
-      band_slot = BAND40;
       mode = FT4_MODE;
       break;
     case 7078000:
-      band_slot = BAND40;
       mode = JS8_MODE;
       break;
     case 7038600:
-      band_slot = BAND40;
       mode = WSP_MODE;
       break;
     // 30M band
     case 10136000:
-      band_slot = BAND30;
       mode = FT8_MODE;
       break;
     case 10140000:
-      band_slot = BAND30;
       mode = FT4_MODE;
       break;
     case 10130000:
-      band_slot = BAND30;
       mode = JS8_MODE;
       break;
     case 10138700:
-      band_slot = BAND30;
       mode = WSP_MODE;
       break;
     // 20M band
     case 14074000:
-      band_slot = BAND20;
       mode = FT8_MODE;
       break;
     case 14080000:
-      band_slot = BAND20;
       mode = FT4_MODE;
       break;
     case 14078000:
-      band_slot = BAND20;
       mode = JS8_MODE;
       break;
     case 14095600:
-      band_slot = BAND20;
       mode = WSP_MODE;
       break;
     // 17M band
     case 18100000:
-      band_slot = BAND17;
       mode = FT8_MODE;
+      break;
+    case 18104000:
+      mode = FT4_MODE;
       break;
     /*
     case 18104000:
-      band_slot = BAND17;
-      mode = FT4_MODE;
-      break;
-    */
-    case 18104000:
-      band_slot = BAND17;
       mode = JS8_MODE;
       break;
+    */
     case 18104600:
-      band_slot = BAND17;
       mode = WSP_MODE;
       break;
     // 15M band
     case 21074000:
-      band_slot = BAND15;
       mode = FT8_MODE;
       break;
     case 21140000:
-      band_slot = BAND15;
       mode = FT4_MODE;
       break;
     case 21078000:
-      band_slot = BAND15;
       mode = JS8_MODE;
       break;
     case 21094600:
-      band_slot = BAND15;
       mode = WSP_MODE;
       break;
     // 12M band
     case 24915000:
-      band_slot = BAND12;
       mode = FT8_MODE;
       break;
     case 24919000:
-      band_slot = BAND12;
       mode = FT4_MODE;
       break;
     case 24922000:
-      band_slot = BAND12;
       mode = JS8_MODE;
       break;
     case 24924600:
-      band_slot = BAND12;
       mode = WSP_MODE;
       break;
     // 10M band
     case 28074000:
-      band_slot = BAND10;
       mode = FT8_MODE;
       break;
     case 28180000:
-      band_slot = BAND10;
       mode = FT4_MODE;
       break;
     case 28078000:
-      band_slot = BAND10;
       mode = JS8_MODE;
       break;
     case 28124600:
-      band_slot = BAND10;
       mode = WSP_MODE;
       break;
     // 6M band
     case 50313000:
-      band_slot = BAND06;
       mode = FT8_MODE;
       break;
     case 50318000:
-      band_slot = BAND06;
+      mode = FT4_MODE;
+      break;
+    /*
+    case 50318000:
       mode = JS8_MODE;
       break;
+    */
     case 50293000:
-      band_slot = BAND06;
       mode = WSP_MODE;
       break;
   }
   // update the frequency
-  si5351.set_freq(freq*100, SI5351_CLK1);
-  base_freq = freq;
-  // display band
-  setLED(0, band_slot);
+  si5351.set_freq(base_freq*100, SI5351_CLK1);
+  display_band();
 }
 
 // manual TX
@@ -876,9 +899,10 @@ void manualTX() {
 void si5351_cal() {
   uint32_t cal_freq = 1000000UL;
   bool done = NO;
-  setLED(0b1111, 0);   // set all LEDs while button pressed
-  wait4buttons();      // wait for all buttons released
-  setLED(0b1001, 0);   // set LEDs to indicate cal mode
+  cat_mode = OFF;
+  setLED(0b1111);   // set all LEDs while button pressed
+  wait4buttons();   // wait for all buttons released
+  setLED(0b1001);   // set LEDs to indicate cal mode
   si5351.drive_strength(SI5351_CLK2, SI5351_DRIVE_2MA);
   si5351.set_freq(cal_freq*100, SI5351_CLK2);
   si5351.set_clock_pwr(SI5351_CLK2, 1);
@@ -917,7 +941,7 @@ void si5351_cal() {
 }
 
 uint8_t  FSKtx = FALSE;
-uint8_t  tx_status = OFF;
+uint8_t  tx_status = RX;
 uint32_t vox_timer;
 
 void FSK_tone() {
@@ -931,14 +955,14 @@ void FSK_tone() {
     if (!FSKtx) {
       clrLED();
       digitalWrite(TXXLED, ON);
-      tx_status = ON;
+      tx_status = TX;
       digitalWrite(RXGATE, OFF);
       si5351.output_enable(SI5351_CLK1, 0);  // RX off
       si5351.output_enable(SI5351_CLK0, 1);  // TX on
       FSKtx = TRUE;
     }
-    uint32_t codefreq = CPUXTL/delta;
-    si5351.set_freq(((freq*100) + codefreq), SI5351_CLK0);
+    uint32_t code_freq = CPUXTL/delta;
+    si5351.set_freq(((base_freq*100) + code_freq), SI5351_CLK0);
     vox_timer = millis();    // reset the vox timer
   }
 }
@@ -949,26 +973,18 @@ void check_VOX() {
     FSKtx = FALSE;
     d2ICR = FALSE;
     rx_mode();
-    setLED(mode, 0);  // display mode
+    display_mode();
   }
 }
 
 // put radio in rx mode
 void rx_mode() {
   digitalWrite(TXXLED, OFF);
-  tx_status = OFF;
+  tx_status = RX;
   si5351.output_enable(SI5351_CLK0, 0);   // TX off
   si5351.set_freq(base_freq*100, SI5351_CLK1);
   si5351.output_enable(SI5351_CLK1, 1);   // RX on
   digitalWrite(RXGATE, ON);
-}
-
-// print an 11-digit frequency
-void printVFO() {
-  if      (freq >= 10000000) Serial.print("000");
-  else if (freq >=  1000000) Serial.print("0000");
-  else                       Serial.print("00000");
-  Serial.print(freq);
 }
 
 // check the UI buttons
@@ -992,8 +1008,8 @@ void check_UI() {
       // left-shift the radio mode
       mode = mode<<1;
       if (mode > MAX_MODE) mode = MIN_MODE; // wrap
-      mode_assign();
-      setLED(mode, 0);   // display mode
+      band_assign();
+      display_mode();
     }
     while (LT_PRESSED);  // wait for release
     delay(DEBOUNCE);
@@ -1012,14 +1028,16 @@ void check_UI() {
       // for long press of > button
       // turn on CAT mode and blink LEDs
       cat_mode = ON;
+      print_cat_mode();
       cylon(LEFT);
+      EEPROM.put(CATX_ADDR, cat_mode);
     } else {
       // for short click of > button
       // right-shift the radio mode
       mode = mode>>1;
       if (mode < MIN_MODE) mode = MAX_MODE; // wrap
-      mode_assign();
-      setLED(mode, 0);   // display mode
+      band_assign();
+      display_mode();
     }
     while (RT_PRESSED);  // wait for release
     delay(DEBOUNCE);
@@ -1039,12 +1057,12 @@ void check_UI() {
       // manual TX
       clrLED();
       manualTX();
-      setLED(mode, 0);  // display mode
+      display_mode();
     } else {
       // for short click of TX button
       // save the radio mode
       blinkTX();
-      setLED(mode, 0);  // display mode
+      display_mode();
       EEPROM.put(MODE_ADDR, mode);
       // wait for release
       while (TX_PRESSED);
@@ -1070,11 +1088,12 @@ void check_CAT() {
       // for long press of > button
       // turn off CAT mode and blink LEDs
       cat_mode = OFF;
+      print_cat_mode();
       cylon(RIGHT);
+      EEPROM.put(CATX_ADDR, cat_mode);
     } else {
       // for short click of > button
-      // display band
-      setLED(0, band_slot);
+      display_band();
     }
     while (RT_PRESSED);  // wait for release
     delay(DEBOUNCE);
@@ -1093,12 +1112,19 @@ void check_CAT() {
       // do nothing
     } else {
       // for short click of > button
-      // display mode
-      setLED(mode, 0);
+      display_mode();
     }
     while (LT_PRESSED);  // wait for release
     delay(DEBOUNCE);
   }
+}
+
+// print an 11-digit frequency
+void CAT_VFO() {
+  if      (base_freq >= 10000000) Serial.print("000");
+  else if (base_freq >=  1000000) Serial.print("0000");
+  else                       Serial.print("00000");
+  Serial.print(base_freq);
 }
 
 // The following CAT commands are implemented
@@ -1116,7 +1142,7 @@ void check_CAT() {
 // RX        - S    receive           returns 0 and clears TX LED
 //
 void CAT_control() {
-  char cmd1[3] = "zz";
+  char cmd[3] = "zz";
   char param[20] = "";
 
   // get next alpha char from serial buffer
@@ -1124,14 +1150,14 @@ void CAT_control() {
   if (ch == 'z') return;  // non-alpha char
 
   // get the command
-  cmd1[0] = ch;
-  cmd1[1] = getc();
-  uppercase(cmd1);
+  cmd[0] = ch;
+  cmd[1] = getc();
+  uppercase(cmd);
 
   // get frequency and other status
-  if (cmpstr(cmd1, "IF")) {
+  if (cmpstr(cmd, "IF")) {
     send("IF");
-    printVFO();
+    CAT_VFO();
     Serial.print("00000+000000000");
     if (tx_status) Serial.print('1');
     else Serial.print('0');
@@ -1139,10 +1165,10 @@ void CAT_control() {
   }
 
   // get radio ID
-  else if (cmpstr(cmd1, "ID")) send("ID019;");
+  else if (cmpstr(cmd, "ID")) send("ID019;");
 
   // get or set frequency
-  else if (cmpstr(cmd1, "FA")) {
+  else if (cmpstr(cmd, "FA")) {
     ch = getc();
     if (numeric(ch)) {
       // set frequency
@@ -1150,20 +1176,20 @@ void CAT_control() {
       for (uint8_t i=0; i<10; i++) {
         catstr(param, getc());
       }
-      freq = fs2int(param);
+      base_freq = fs2int(param);
       // set band and mode
       freq2band();
       getsemi(); // get semicolon
     } else {
       // get frequency
       Serial.print("FA");
-      printVFO();
+      CAT_VFO();
       Serial.print(";");
     }
   }
 
   // get or set the radio mode
-  else if (cmpstr(cmd1, "MD")) {
+  else if (cmpstr(cmd, "MD")) {
     ch = getc();
     if (numeric(ch)) {
       // set radio mode
@@ -1176,7 +1202,7 @@ void CAT_control() {
   }
 
   // get or set auto-information status
-  else if (cmpstr(cmd1, "AI")) {
+  else if (cmpstr(cmd, "AI")) {
     ch = getc();
     if (numeric(ch)) {
       // set auto-information status
@@ -1189,7 +1215,7 @@ void CAT_control() {
   }
 
   // get or set the power (ON/OFF) status
-  else if (cmpstr(cmd1, "PS")) {
+  else if (cmpstr(cmd, "PS")) {
     ch = getc();
     if (numeric(ch)) {
       // set power (ON/OFF) status
@@ -1202,7 +1228,7 @@ void CAT_control() {
   }
 
   // get or set the XIT (ON/OFF) status
-  else if (cmpstr(cmd1, "XT")) {
+  else if (cmpstr(cmd, "XT")) {
     ch = getc();
     if (numeric(ch)) {
       // set XIT (ON/OFF) status
@@ -1215,15 +1241,15 @@ void CAT_control() {
   }
 
   // CAT transmit
-  else if (cmpstr(cmd1, "TX")) {
+  else if (cmpstr(cmd, "TX")) {
     getsemi(); // get semicolon
-    tx_status = ON;
+    tx_status = TX;
   }
 
   // CAT receive
-  else if (cmpstr(cmd1, "RX")) {
+  else if (cmpstr(cmd, "RX")) {
     getsemi(); // get semicolon
-    tx_status = OFF;
+    tx_status = RX;
   }
 
   // ===========================
@@ -1231,11 +1257,11 @@ void CAT_control() {
   // ===========================
 
   // factory reset
-  else if (cmpstr(cmd1, "FR")) {
+  else if (cmpstr(cmd, "FR")) {
     factory_reset();
   }
   // calibrate mode
-  else if (cmpstr(cmd1, "CM")) {
+  else if (cmpstr(cmd, "CM")) {
     calibrate_mode();
   }
 
@@ -1243,19 +1269,23 @@ void CAT_control() {
 
 // write to the eeprom
 void save_eeprom() {
+  Serial.println("Saving settings to EEPROM");
   EEPROM.put(DATA_ADDR, cal_data);
   EEPROM.put(MODE_ADDR, mode);
-  EEPROM.put(SLOT_ADDR, band_slot);
+  EEPROM.put(BAND_ADDR, band);
+  EEPROM.put(CATX_ADDR, cat_mode);
 }
 
 // read the eeprom
 void read_eeprom() {
+  Serial.println("Reading settings from EEPROM");
   while (LT_PRESSED);  // wait for release
   delay(DEBOUNCE);
   clrLED();
   EEPROM.get(DATA_ADDR, cal_data);
   EEPROM.get(MODE_ADDR, mode);
-  EEPROM.get(SLOT_ADDR, band_slot);
+  EEPROM.get(BAND_ADDR, band);
+  EEPROM.get(CATX_ADDR, cat_mode);
   if ((cal_data < 100) || (cal_data > 100000)) {
     cal_data = CAL_DATA_INIT;
     EEPROM.put(DATA_ADDR, cal_data);
@@ -1264,10 +1294,14 @@ void read_eeprom() {
     mode = MAX_MODE;
     EEPROM.put(MODE_ADDR, mode);
   }
-  if ((band_slot < MIN_SLOT) || (band_slot > MAX_SLOT)) {
-    band_slot = MIN_SLOT;
-    EEPROM.put(SLOT_ADDR, band_slot);
+  if ((band < MIN_BAND) || (band > MAX_BAND)) {
+    band = MIN_BAND;
+    EEPROM.put(BAND_ADDR, band);
   }
+  print_band();
+  print_mode();
+  print_cat_mode();
+  print_cal_data();
 }
 
 // initialize the Set Si5351 VFO
@@ -1314,43 +1348,62 @@ void print_band() {
   const char* band_label[]  = {
   "??",   "6M", "10M", "12M", "15M", "17M",
   "20M", "30M", "40M", "60M", "80M", "160M" };
-  Serial.print("band = ");
-  Serial.println(band_label[band_slot]);
+  if (DEBUG1) {
+    Serial.print("band = ");
+    Serial.println(band_label[band]);
+  }
 }
 
 // debug print of current mode
 void print_mode() {
-  Serial.print("mode = ");
-  switch (mode) {
-    case WSP_MODE:
-      Serial.println("WSPR");
-      break;
-    case JS8_MODE:
-      Serial.println("JS8");
-      break;
-    case FT4_MODE:
-      Serial.println("FT4");
-      break;
-    case FT8_MODE:
-      Serial.println("FT8");
-      break;
-    default:
-      break;
+  if (DEBUG1) {
+    Serial.print("mode = ");
+    switch (mode) {
+      case WSP_MODE:
+        Serial.println("WSPR");
+        break;
+      case JS8_MODE:
+        Serial.println("JS8");
+        break;
+      case FT4_MODE:
+        Serial.println("FT4");
+        break;
+      case FT8_MODE:
+        Serial.println("FT8");
+        break;
+      default:
+        break;
+    }
   }
+}
+
+// debug print of CAT mode
+void print_cat_mode() {
+  if (cat_mode) Serial.println("CAT mode is ON");
+  else Serial.println("CAT mode is OFF");
+}
+
+// debug print of calibration data
+void print_cal_data() {
+  Serial.print("cal_data = ");
+  Serial.println(cal_data);
 }
 
 // factory reset (CAT command)
 void factory_reset() {
   cal_data = CAL_DATA_INIT;
-  band_slot = BAND20;
+  band = BAND20;
   mode = FT8_MODE;
-  save_eeprom();
-  Serial.println('\n');
+  cat_mode = ON;
   Serial.println("factory reset");
   print_band();
   print_mode();
+  print_cat_mode();
+  print_cal_data();
   band_assign();
-  blink_both();  // blink band then mode on LEDs
+  blink_both();   // blink band then mode on LEDs
+  save_eeprom();  // save factory settings
+  rx_mode();
 }
 
 // calibrate si5351 (CAT command)
@@ -1361,9 +1414,9 @@ void calibrate_mode() {
   uint8_t xx = 0;
   bool done = NO;
   uint32_t cal_freq = 1000000UL;
-  setLED(0b1111, 0);   // set all LEDs
+  setLED(0b1111);   // set all LEDs
   delay(500);
-  setLED(0b1001, 0);   // set LEDs to indicate cal mode
+  setLED(0b1001);   // set LEDs to indicate cal mode
   Serial.println('\n');
   Serial.println("calibration mode");
   Serial.println("press + to increase cal frequency");
@@ -1433,7 +1486,7 @@ void setup() {
 
 // Arduino main loop
 void loop() {
-  FSK_tone();
+  FSK_tone();              // measure FSK frequency
   if (FSKtx) check_VOX();  // check for VOX timeout
   if (cat_mode) check_CAT();
   else check_UI();
