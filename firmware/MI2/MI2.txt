@@ -1,0 +1,5 @@
+
+ADX MINI and MI2 are 100% firmware compatible.
+
+MI2 radios use ADX MINI firmware.
+
