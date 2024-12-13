@@ -20,6 +20,8 @@ The ADX-MI3 replaces the UI pushbuttons and status LEDs with an OLED and additio
 
 * Scott L Baker
 
+* If you like my designs and would like to support my work: https://buymeacoffee.com/scottlbaker
+
 
 ## Acknowledgement
 
